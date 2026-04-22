@@ -34,7 +34,7 @@
   ],
   "targets": [
     {
-      "name": "default"
+      "name": "entry"
     },
     {
       "name": "ohosTest",

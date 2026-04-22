@@ -1,0 +1,4 @@
+Backup created for .hvigor directory due to EBUSY error
+Original path: D:/code/test/HiSH3/.hvigor
+Backup time: Current time
+Reason: Resource busy or locked error during compilation

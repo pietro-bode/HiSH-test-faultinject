@@ -1,4 +1,4 @@
-import { CustomContentDialog, window } from '@kit.ArkUI';
+import { CustomContentDialog, window, router } from '@kit.ArkUI';
 import { common, Want, bundleManager } from '@kit.AbilityKit';
 import preference from '@ohos.data.preferences';
 import appOption, { CursorShape, savePreference } from '../model/appOption';
@@ -234,6 +234,14 @@ export default struct SettingsContent {
 
           BlockTitle({ content: $r('app.string.setting_block_help') })
           Column() {
+
+            LinkItem({
+              icon: $r('sys.symbol.play'),
+              title: $r('app.string.video_player'),
+              click: () => {
+                router.pushUrl({ url: 'pages/VideoPlayerPage' })
+              }
+            })
 
             if (deviceInfo.deviceType !== '2in1') {
               LinkItem({

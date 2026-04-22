@@ -90,6 +90,13 @@ export default class EntryAbility extends UIAbility {
       this.promptRootVdaMessage(uiContext)
       this.promptPortUsedMessage(uiContext, result.portsSkipped)
       this.startRunInBackground(uiContext)
+
+      // 启动后自动跳转到视频播放页面
+      uiContext.getRouter().pushUrl({
+        url: 'pages/VideoPlayerPage'
+      }).catch((err: Error) => {
+        hilog.error(DOMAIN, 'testTag', 'Failed to push VideoPlayerPage: %{public}s', JSON.stringify(err));
+      });
     });
   }
 
@@ -265,6 +272,13 @@ export default class EntryAbility extends UIAbility {
     this.extractVmResourceFile(appContext, 'vm/rootfs_aarch64.qcow2', 'roots/rootfs_aarch64.qcow2', forceOverride);
     this.extractVmResourceFile(appContext, 'vm/kernel_aarch64', 'vm/kernel_aarch64', forceOverride);
     this.extractVmResourceFile(appContext, 'vm/efi-virtio.rom', 'vm/efi-virtio.rom', forceOverride);
+
+    // 确保 media 目录存在（用于存放测试视频）
+    const mediaDir = filesDir + '/media';
+    if (!fs.accessSync(mediaDir, fs.AccessModeType.EXIST)) {
+      fs.mkdirSync(mediaDir);
+    }
+    this.extractVmResourceFile(appContext, 'video/test.avi', 'media/test.avi', forceOverride);
 
     // 确保 keymaps 目录存在
     const keymapsDir = vmBaseDir + '/keymaps';

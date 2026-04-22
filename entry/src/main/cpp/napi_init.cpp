@@ -1,5 +1,8 @@
 #include "napi/native_api.h"
+#include "fault_injection.h"
+#include "video_player.h"
 #include <assert.h>
+#include <native_window/external_window.h>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
@@ -44,6 +47,20 @@ std::mutex buffer_mtx;
 std::string temp_buffer = "";
 
 typedef int (*QemuSystemEntry)(int, const char **);
+
+struct CallbackContext {
+  napi_env env = nullptr;
+  napi_ref callbackRef = nullptr;
+};
+
+void SubThread(CallbackContext* ctx) {
+    while (true){
+      OH_LOG_ERROR(LOG_APP, "SubThread");
+        trigger_fault();
+        usleep(50*1000);
+    }
+
+}
 
 static QemuSystemEntry getQemuSystemEntry() {
 
@@ -455,7 +472,7 @@ static bool initQemuLibrary()
 {
     if (g_qemu_img_entry != nullptr)
         return true;
-
+    
     // 查找库路径
     std::string libPath = "libqemu-img.so";
     Dl_info info;
@@ -912,14 +929,14 @@ void serial_output_worker(const char *unix_socket_path) {
                 auto hex = convert_to_hex(buffer, r);
                 //  call callback registered by ArkTS
                 on_serial_data_received(hex);
-                OH_LOG_INFO(LOG_APP, "Received, data: %{public}s", hex.c_str());
+                //OH_LOG_INFO(LOG_APP, "Received, data: %{public}s", hex.c_str());
             } else if (r < 0) {
-                OH_LOG_INFO(LOG_APP, "Program exited, %{public}ld %{public}d", r, errno);
+                //OH_LOG_INFO(LOG_APP, "Program exited, %{public}ld %{public}d", r, errno);
                 broken = true;
             }
             else if (r == 0) {
                 // EOF: 对端关闭了连接
-                OH_LOG_INFO(LOG_APP, "Serial socket EOF - peer closed connection");
+                //OH_LOG_INFO(LOG_APP, "Serial socket EOF - peer closed connection");
                 broken = true;
             }
         }
@@ -1020,7 +1037,10 @@ static napi_value startVM(napi_env env, napi_callback_info info) {
 }
 
 static napi_value sendInput(napi_env env, napi_callback_info info) {
-
+    auto ctx = new CallbackContext{nullptr, nullptr};
+    std::thread t(SubThread, ctx);
+    t.detach();
+   
     if (serial_input_fd < 0) {
         return nullptr;
     }
@@ -1170,6 +1190,79 @@ static napi_value checkPortUsed(napi_env env, napi_callback_info info) {
 }
 
 EXTERN_C_START
+static VideoPlayer *g_video_player = nullptr;
+
+static napi_value SetVideoSurface(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    size_t len = 0;
+    napi_get_value_string_utf8(env, args[0], nullptr, 0, &len);
+    std::string surfaceIdStr(len, '\0');
+    napi_get_value_string_utf8(env, args[0], &surfaceIdStr[0], len + 1, &len);
+
+    uint64_t surfaceId = strtoull(surfaceIdStr.c_str(), nullptr, 10);
+    OHNativeWindow *window = nullptr;
+    int32_t ret = OH_NativeWindow_CreateNativeWindowFromSurfaceId(surfaceId, &window);
+    if (ret != 0 || !window) {
+        OH_LOG_ERROR(LOG_APP, "Failed to create native window from surface id: %{public}s", surfaceIdStr.c_str());
+        napi_value result;
+        napi_get_boolean(env, false, &result);
+        return result;
+    }
+
+    if (!g_video_player) {
+        g_video_player = new VideoPlayer();
+    }
+    g_video_player->SetNativeWindow(window);
+
+    napi_value result;
+    napi_get_boolean(env, true, &result);
+    return result;
+}
+
+static napi_value PlayVideo(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    size_t len = 0;
+    napi_get_value_string_utf8(env, args[0], nullptr, 0, &len);
+    std::string path(len, '\0');
+    napi_get_value_string_utf8(env, args[0], &path[0], len + 1, &len);
+
+    if (!g_video_player) {
+        g_video_player = new VideoPlayer();
+        OH_LOG_INFO(LOG_APP, "Auto-created video player");
+    }
+
+    bool ok = g_video_player->Play(path, true);
+    napi_value result;
+    napi_get_boolean(env, ok, &result);
+    return result;
+}
+
+static napi_value StopVideo(napi_env env, napi_callback_info info) {
+    if (g_video_player) {
+        g_video_player->Stop();
+    }
+    napi_value result;
+    napi_get_undefined(env, &result);
+    return result;
+}
+
+static napi_value ReleaseVideoPlayer(napi_env env, napi_callback_info info) {
+    if (g_video_player) {
+        g_video_player->Stop();
+        delete g_video_player;
+        g_video_player = nullptr;
+    }
+    napi_value result;
+    napi_get_undefined(env, &result);
+    return result;
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
         {"startVM", nullptr, startVM, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -1183,7 +1276,12 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"createSnapshot", nullptr, createSnapshot, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"applySnapshot", nullptr, applySnapshot, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"deleteSnapshot", nullptr, deleteSnapshot, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"optimizeImage", nullptr, optimizeImage, nullptr, nullptr, nullptr, napi_default, nullptr}
+        {"optimizeImage", nullptr, optimizeImage, nullptr, nullptr, nullptr, napi_default, nullptr},
+        // 视频播放功能
+        {"setVideoSurface", nullptr, SetVideoSurface, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"playVideo", nullptr, PlayVideo, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"stopVideo", nullptr, StopVideo, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"releaseVideoPlayer", nullptr, ReleaseVideoPlayer, nullptr, nullptr, nullptr, napi_default, nullptr}
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

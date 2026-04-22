@@ -1619,6 +1619,10 @@
     {
       "name": "agent_connecting_tips",
       "value": "Attempting to connect to qemu-guest-agent...\nIf it takes too long to connect, please check if the qemu-guest-agent inside the emulator is running properly"
+    },
+    {
+      "name": "video_player",
+      "value": "Video Player"
     }
   ]
 }

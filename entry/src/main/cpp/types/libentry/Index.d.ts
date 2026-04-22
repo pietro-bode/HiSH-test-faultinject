@@ -62,3 +62,29 @@ export const deleteSnapshot: (imagePath: string, snapshotName: string) => string
  * @returns JSON 格式的结果
  */
 export const optimizeImage: (imagePath: string, outputPath: string, mode: 'sparse' | 'prealloc' | 'cleanup' | 'optimize') => string;
+
+// ================== FFmpeg 视频播放功能 ==================
+
+/**
+ * 绑定 XComponent 的 Surface 到视频播放器
+ * @param surfaceId XComponent Surface ID (通过 context.getXComponentSurfaceId() 获取)
+ * @returns 是否成功
+ */
+export const setVideoSurface: (surfaceId: string) => boolean;
+
+/**
+ * 播放本地视频文件（默认循环播放）
+ * @param path 视频文件的完整沙箱路径
+ * @returns 是否成功开始播放
+ */
+export const playVideo: (path: string) => boolean;
+
+/**
+ * 停止视频播放
+ */
+export const stopVideo: () => void;
+
+/**
+ * 释放视频播放器资源
+ */
+export const releaseVideoPlayer: () => void;

@@ -184,6 +184,7 @@ struct PcIndex {
           .onClick((event: ClickEvent) => {
             this.userGuideController.open()
           })
+
         }
       }
       .width('100%')

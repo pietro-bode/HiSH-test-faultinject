@@ -1,10 +1,11 @@
 {
   "app": {
-    "bundleName": "dev.hackeris.hish",
+    "bundleName": "dev.hackeris.hish.test",
     "vendor": "hackeris",
     "versionCode": 1000013,
     "versionName": "1.0.13",
     "icon": "$media:app_layered_image",
-    "label": "$string:app_name"
+    "label": "$string:app_name",
+    "GWPAsanEnabled": true
   }
 }
