@@ -1,5 +1,5 @@
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want, bundleManager } from '@kit.AbilityKit';
-import { hilog } from '@kit.PerformanceAnalysisKit';
+import { hilog, hidebug } from '@kit.PerformanceAnalysisKit';
 import { window, KeyboardAvoidMode, PromptAction, UIContext } from '@kit.ArkUI';
 import common from '@ohos.app.ability.common';
 import preference from '@ohos.data.preferences';
@@ -44,6 +44,17 @@ export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
+
+    // 配置 GWP-ASan 参数（API 20+ 支持）
+    try {
+      hidebug.enableGwpAsanGrayscale({
+        sampleRate: 500,
+        maxSimutaneousAllocations: 5000
+      });
+      hilog.info(DOMAIN, 'testTag', 'GWP-ASan configured: sampleRate=500, maxSimutaneousAllocations=5000');
+    } catch (e) {
+      hilog.error(DOMAIN, 'testTag', 'Failed to configure GWP-ASan: %{public}s', JSON.stringify(e));
+    }
   }
 
   onDestroy(): void {

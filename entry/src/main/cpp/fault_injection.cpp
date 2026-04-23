@@ -20,20 +20,36 @@ static char *get_stack_string() {
 
 void random_trigger_fault() {
     // 随机选择故障类型 (0~9)
-    int fault_type = rand() % 10;
+    int fault_type = rand() % 5;
     OH_LOG_ERROR(LOG_APP, "[FAULT] trigger #%{public}u, type=%{public}d", trigger_fault_cnt++, fault_type);
-    if (fault_type == 0) {
-        // Heap Buffer Overflow — loop 越界写入
-        char *buf = (char *)malloc(16);
-        if (buf) {
-            OH_LOG_ERROR(LOG_APP, "[FAULT] HeapOverflow(loop) addr=%{public}p, alloc_size=16, write_size=64", (void*)buf);
-            for (int i = 0; i < 64; i++) {
-                buf[i] = 'A';
+    
+    // 先进行大量随机内存分配/释放，搅动堆状态（防止编译优化）
+    volatile int alloc_count = (rand() % 991) + 10; // 10~1000 次
+        for (volatile int i = 0; i < alloc_count; i++) {
+            volatile int size = (rand() % 113) + 16; // 16~128 字节
+            volatile unsigned char *tmp = (volatile unsigned char *)malloc((size_t)size);
+            if (tmp) {
+                // 填充数据，volatile 写入确保不会被编译优化掉
+                for (volatile int j = 0; j < size / 4; j++) {
+                    tmp[j] = (unsigned char)(rand() % 256);
+                }
+                printf("%x\n", tmp[0]);
+                free((void *)tmp);
             }
+        }
+
+    if (fault_type == 0) {
+        // Use-After-Free — 读取已释放内存
+        char *buf = (char *)malloc(64);
+        if (buf) {
+            OH_LOG_ERROR(LOG_APP, "[FAULT] UAF-Read addr=%{public}p, alloc_size=64", (void*)buf);
+            strcpy(buf, "sensitive info");
             free(buf);
+            OH_LOG_ERROR(LOG_APP, "[FAULT] UAF-Read accessing freed addr=%{public}p", (void*)buf);
         }
     }
     else if (fault_type == 1) {
+
         // Use-After-Free — 写入已释放内存
         char *buf = (char *)malloc(32);
         if (buf) {
@@ -44,7 +60,6 @@ void random_trigger_fault() {
         }
     }
     else if (fault_type == 2) {
-        // Double Free — 重复释放同一块内存
         char *buf = (char *)malloc(24);
         if (buf) {
             OH_LOG_ERROR(LOG_APP, "[FAULT] DoubleFree addr=%{public}p, alloc_size=24", (void*)buf);
@@ -53,12 +68,10 @@ void random_trigger_fault() {
         }
     }
     else if (fault_type == 3) {
-#if 0
         // Stack Buffer Overflow — 栈缓冲区溢出
         char stack_buf[16];
         OH_LOG_ERROR(LOG_APP, "[FAULT] StackOverflow addr=%{public}p, buf_size=16", (void*)stack_buf);
         strcpy(stack_buf, "This is a very long string that exceeds 16 bytes");
-#endif
     }
     else if (fault_type == 4) {
         // Stack Use-After-Return — 返回后访问栈变量
@@ -67,13 +80,14 @@ void random_trigger_fault() {
         printf("%s\n", bad_ptr);
     }
     else if (fault_type == 5) {
-        // Use-After-Free — 读取已释放内存
-        char *buf = (char *)malloc(64);
+        // Heap Buffer Overflow — loop 越界写入
+        char *buf = (char *)malloc(16);
         if (buf) {
-            OH_LOG_ERROR(LOG_APP, "[FAULT] UAF-Read addr=%{public}p, alloc_size=64", (void*)buf);
-            strcpy(buf, "sensitive info");
+            OH_LOG_ERROR(LOG_APP, "[FAULT] HeapOverflow(loop) addr=%{public}p, alloc_size=16, write_size=64", (void*)buf);
+            for (int i = 0; i < 64; i++) {
+                buf[i] = 'A';
+            }
             free(buf);
-            OH_LOG_ERROR(LOG_APP, "[FAULT] UAF-Read accessing freed addr=%{public}p", (void*)buf);
         }
     }
     else if (fault_type == 6) {

@@ -155,6 +155,14 @@ function Invoke-HdcFileRecv {
     return ($output -join "`n").Trim()
 }
 
+function Enable-GwpAsanProp {
+    $prop = "gwp_asan.enable.app.$BundleName"
+    Write-Info "设置 GWP-ASan 系统属性: $prop=true"
+    $result = Invoke-HdcShell -Command "param set $prop true"
+    Write-Info "设置结果: $result"
+    return $result
+}
+
 function Start-App {
     if ($LaunchMode -eq "test") {
         $cmd = "aa test -b $BundleName -m entry_test"
@@ -363,6 +371,9 @@ try {
         # 记录启动前的日志基准
         $baselineLogs = Get-FaultLoggerFiles
         Write-Info "启动前故障日志基准: $($baselineLogs.Count) 个文件"
+
+        # 设置 GWP-ASan 属性
+        Enable-GwpAsanProp | Out-Null
 
         # 启动应用
         Start-App | Out-Null

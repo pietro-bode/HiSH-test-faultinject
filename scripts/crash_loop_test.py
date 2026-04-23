@@ -160,6 +160,13 @@ class CrashLoopTester:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         print_info(f"PC 端日志保存目录: {self.log_dir}")
 
+    def enable_gwp_asan_prop(self) -> str:
+        prop = f"gwp_asan.enable.app.{self.bundle_name}"
+        print_info(f"设置 GWP-ASan 系统属性: {prop}=true")
+        result = self.hdc.shell(f"param set {prop} true")
+        print_info(f"设置结果: {result}")
+        return result
+
     def start_app(self) -> str:
         if self.launch_mode == "test":
             cmd = f"aa test -b {self.bundle_name} -m entry_test"
@@ -324,6 +331,7 @@ class CrashLoopTester:
                 self._baseline_logs = self.list_faultlogger_files()
                 print_info(f"启动前故障日志基准: {len(self._baseline_logs)} 个文件")
 
+                self.enable_gwp_asan_prop()
                 self.start_app()
                 time.sleep(3)
 
