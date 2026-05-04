@@ -1,8 +1,14 @@
 #include "fault_injection.h"
+#include "fault_uaf.h"
+#include "fault_double_free.h"
+#include "fault_stack.h"
+#include "fault_heap_overflow.h"
+#include "fault_mismatch.h"
 #include <cstdlib>
-#include <cstring>
 #include <cstdio>
 #include <unistd.h>
+#include <random>
+#include <atomic>
 #include "hilog/log.h"
 
 #undef LOG_DOMAIN
@@ -11,125 +17,126 @@
 #define LOG_TAG "HiSH"
 
 static unsigned int trigger_fault_cnt = 0;
-static char *g_uaf_ptr = nullptr;
+static std::atomic<bool> g_gwpasan_detected{false};
+static std::random_device rd;
+static std::mt19937 gen(rd());
+static std::uniform_int_distribution<> prob_dis(0, 99);
+static std::uniform_int_distribution<> alloc_count_dis(10, 1000);
+static std::uniform_int_distribution<> size_dis(16, 128);
+static std::uniform_int_distribution<> byte_dis(0, 255);
 
-static char *get_stack_string() {
-    char local_buf[32] = "stack_secret_data";
-    return local_buf; // 返回栈局部变量的地址，函数返回后该内存失效
+// 只随机选择一次故障类型，后续一直复用
+static int selected_fault_type = -1;
+
+static int pick_fault_type_once() {
+    // 概率分布（百分比）：
+    // 栈故障(types 3,4): 5%
+    // 堆溢出(types 5,6,8): 10%
+    // trigger_mismatched_new_delete(type 7): 1%
+    // trigger_uaf_global_ptr(type 9): 1%
+    // double_free(type 2): 1%
+    // 其他(types 0,1): 82%
+    int prob = prob_dis(gen);
+    int fault_type;
+
+    if (prob < 2) {              // 0-1:  2%
+        fault_type = 3;          // stack_overflow
+    } else if (prob < 5) {       // 2-4:  3%
+        fault_type = 4;          // stack_uar
+    } else if (prob < 8) {       // 5-7:  3%
+        fault_type = 5;          // heap_overflow_loop
+    } else if (prob < 11) {      // 8-10: 3%
+        fault_type = 6;          // heap_overflow_strcpy
+    } else if (prob < 15) {      // 11-14: 4%
+        fault_type = 8;          // heap_overflow_off_by_one
+    } else if (prob < 16) {      // 15:   1%
+        fault_type = 7;          // mismatched_new_delete
+    } else if (prob < 17) {      // 16:   1%
+        fault_type = 9;          // uaf_global_ptr
+    } else if (prob < 18) {      // 17:   1%
+        fault_type = 2;          // double_free
+    } else if (prob < 59) {      // 18-58: 41%
+        fault_type = 0;          // uaf_read
+    } else {                     // 59-99: 41%
+        fault_type = 1;          // uaf_write
+    }
+    return fault_type;
 }
 
 void random_trigger_fault() {
-    // 随机选择故障类型 (0~9)
-    int fault_type = rand() % 5;
-    OH_LOG_ERROR(LOG_APP, "[FAULT] trigger #%{public}u, type=%{public}d", trigger_fault_cnt++, fault_type);
+    if (selected_fault_type < 0) {
+        selected_fault_type = pick_fault_type_once();
+        OH_LOG_ERROR(LOG_APP, "[FAULT] First trigger, randomly selected type=%{public}d, all subsequent injections will use this type",
+                     selected_fault_type);
+    }
+
+    int fault_type = selected_fault_type;
+
+    OH_LOG_ERROR(LOG_APP, "[FAULT] trigger #%{public}u, type=%{public}d (fixed)",
+                 trigger_fault_cnt++, fault_type);
     
     // 先进行大量随机内存分配/释放，搅动堆状态（防止编译优化）
-    volatile int alloc_count = (rand() % 991) + 10; // 10~1000 次
-        for (volatile int i = 0; i < alloc_count; i++) {
-            volatile int size = (rand() % 113) + 16; // 16~128 字节
-            volatile unsigned char *tmp = (volatile unsigned char *)malloc((size_t)size);
-            if (tmp) {
-                // 填充数据，volatile 写入确保不会被编译优化掉
-                for (volatile int j = 0; j < size / 4; j++) {
-                    tmp[j] = (unsigned char)(rand() % 256);
-                }
-                printf("%x\n", tmp[0]);
-                free((void *)tmp);
+    volatile int alloc_count = alloc_count_dis(gen);
+    for (volatile int i = 0; i < alloc_count; i++) {
+        volatile int size = size_dis(gen);
+        volatile unsigned char *tmp = (volatile unsigned char *)malloc((size_t)size);
+        if (tmp) {
+            for (volatile int j = 0; j < size / 4; j++) {
+                tmp[j] = (unsigned char)byte_dis(gen);
             }
+            printf("%x\n", tmp[0]);
+            free((void *)tmp);
         }
+    }
 
     if (fault_type == 0) {
-        // Use-After-Free — 读取已释放内存
-        char *buf = (char *)malloc(64);
-        if (buf) {
-            OH_LOG_ERROR(LOG_APP, "[FAULT] UAF-Read addr=%{public}p, alloc_size=64", (void*)buf);
-            strcpy(buf, "sensitive info");
-            free(buf);
-            OH_LOG_ERROR(LOG_APP, "[FAULT] UAF-Read accessing freed addr=%{public}p", (void*)buf);
-        }
+        trigger_uaf_read();
     }
     else if (fault_type == 1) {
-
-        // Use-After-Free — 写入已释放内存
-        char *buf = (char *)malloc(32);
-        if (buf) {
-            OH_LOG_ERROR(LOG_APP, "[FAULT] UAF-Write addr=%{public}p, alloc_size=32", (void*)buf);
-            strcpy(buf, "test data");
-            free(buf);
-            buf[0] = 'X';
-        }
+        trigger_uaf_write();
     }
     else if (fault_type == 2) {
-        char *buf = (char *)malloc(24);
-        if (buf) {
-            OH_LOG_ERROR(LOG_APP, "[FAULT] DoubleFree addr=%{public}p, alloc_size=24", (void*)buf);
-            free(buf);
-            free(buf);
-        }
+        trigger_double_free();
     }
     else if (fault_type == 3) {
-        // Stack Buffer Overflow — 栈缓冲区溢出
-        char stack_buf[16];
-        OH_LOG_ERROR(LOG_APP, "[FAULT] StackOverflow addr=%{public}p, buf_size=16", (void*)stack_buf);
-        strcpy(stack_buf, "This is a very long string that exceeds 16 bytes");
+        trigger_stack_overflow();
     }
     else if (fault_type == 4) {
-        // Stack Use-After-Return — 返回后访问栈变量
-        char *bad_ptr = get_stack_string();
-        OH_LOG_ERROR(LOG_APP, "[FAULT] StackUAR addr=%{public}p", (void*)bad_ptr);
-        printf("%s\n", bad_ptr);
+        trigger_stack_uar();
     }
     else if (fault_type == 5) {
-        // Heap Buffer Overflow — loop 越界写入
-        char *buf = (char *)malloc(16);
-        if (buf) {
-            OH_LOG_ERROR(LOG_APP, "[FAULT] HeapOverflow(loop) addr=%{public}p, alloc_size=16, write_size=64", (void*)buf);
-            for (int i = 0; i < 64; i++) {
-                buf[i] = 'A';
-            }
-            free(buf);
-        }
+        trigger_heap_overflow_loop();
     }
     else if (fault_type == 6) {
-        // Heap Buffer Overflow — strcpy 导致堆溢出
-        char *buf = (char *)malloc(10);
-        if (buf) {
-            OH_LOG_ERROR(LOG_APP, "[FAULT] HeapOverflow(strcpy) addr=%{public}p, alloc_size=10", (void*)buf);
-            strcpy(buf, "This_string_is_way_longer_than_10_bytes");
-            free(buf);
-        }
+        trigger_heap_overflow_strcpy();
     }
     else if (fault_type == 7) {
-        // Mismatched new/delete — new[] 配 delete（不匹配）
-        int *arr = new int[20];
-        OH_LOG_ERROR(LOG_APP, "[FAULT] MismatchedNewDelete addr=%{public}p, new int[20] -> delete", (void*)arr);
-        arr[0] = 123;
-        delete arr;
+        trigger_mismatched_new_delete();
     }
     else if (fault_type == 8) {
-        // Heap Buffer Overflow — off-by-one 越界
-        int *arr = (int *)malloc(sizeof(int) * 10);
-        if (arr) {
-            OH_LOG_ERROR(LOG_APP, "[FAULT] HeapOverflow(off-by-one) addr=%{public}p, alloc_count=10, access_index=10", (void*)arr);
-            for (int i = 0; i <= 10; i++) {
-                arr[i] = i * i;
-            }
-            free(arr);
-        }
+        trigger_heap_overflow_off_by_one();
     }
     else if (fault_type == 9) {
-        // Use-After-Free — 通过全局/静态指针访问已释放内存
-        g_uaf_ptr = (char *)malloc(48);
-        if (g_uaf_ptr) {
-            OH_LOG_ERROR(LOG_APP, "[FAULT] UAF-GlobalPtr addr=%{public}p, alloc_size=48", (void*)g_uaf_ptr);
-            strcpy(g_uaf_ptr, "global uaf test");
-            free(g_uaf_ptr);
-            g_uaf_ptr[0] = 'G';
-            g_uaf_ptr = nullptr;
-        }
+        trigger_uaf_global_ptr();
     }
 }
 
+void set_gwpasan_detected(bool detected) {
+    g_gwpasan_detected.store(detected);
+    if (detected) {
+        OH_LOG_ERROR(LOG_APP, "[GWP-ASAN] Fault injection gated - GWP-ASAN event detected");
+    }
+}
+
+bool is_gwpasan_detected() {
+    return g_gwpasan_detected.load();
+}
+
 void trigger_fault(){
+    if (g_gwpasan_detected.load()) {
+        OH_LOG_INFO(LOG_APP, "[GWP-ASAN] Skipping fault injection #%{public}u - GWP-ASAN event previously detected",
+                     trigger_fault_cnt);
+        return;
+    }
     random_trigger_fault();
 }

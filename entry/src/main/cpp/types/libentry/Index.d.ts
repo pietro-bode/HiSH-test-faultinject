@@ -88,3 +88,17 @@ export const stopVideo: () => void;
  * 释放视频播放器资源
  */
 export const releaseVideoPlayer: () => void;
+
+// ================== GWP-ASAN 故障检测与注入控制 ==================
+
+/**
+ * 设置 GWP-ASAN 事件检测标志。一旦设置为 true，后续的故障注入将被跳过。
+ * @param detected 是否检测到 GWP-ASAN 事件
+ */
+export const setGwpAsanDetected: (detected: boolean) => void;
+
+/**
+ * 在指定秒数后调用 abort() 终止进程。用于 GWP-ASAN 检测后的延迟自杀。
+ * @param delaySeconds 延迟秒数，默认 300（5分钟）
+ */
+export const scheduleAbort: (delaySeconds: number) => void;

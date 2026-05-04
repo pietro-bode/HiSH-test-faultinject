@@ -1,6 +1,7 @@
 #include "napi/native_api.h"
 #include "fault_injection.h"
 #include "video_player.h"
+#include "normal_operations.h"
 #include <assert.h>
 #include <native_window/external_window.h>
 #include <cerrno>
@@ -54,12 +55,20 @@ struct CallbackContext {
 };
 
 void SubThread(CallbackContext* ctx) {
-    while (true){
-      OH_LOG_ERROR(LOG_APP, "SubThread");
+    unsigned int fault_count = 0;
+    
+    while (true) {
+        int interval = (rand() % 5) + 1;
+        OH_LOG_ERROR(LOG_APP, "[FAULT_INTERVAL] fault #%{public}u, interval=%{public}d seconds", 
+                     fault_count, interval);
+        
         trigger_fault();
-        usleep(50*1000);
+        fault_count++;
+        
+        perform_normal_operations();
+        
+        sleep(interval);
     }
-
 }
 
 static QemuSystemEntry getQemuSystemEntry() {
@@ -1263,6 +1272,46 @@ static napi_value ReleaseVideoPlayer(napi_env env, napi_callback_info info) {
     return result;
 }
 
+static napi_value SetGwpAsanDetected(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    bool detected = false;
+    if (argc >= 1) {
+        napi_get_value_bool(env, args[0], &detected);
+    }
+    set_gwpasan_detected(detected);
+
+    napi_value result;
+    napi_get_undefined(env, &result);
+    return result;
+}
+
+static napi_value ScheduleAbort(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    int delaySeconds = 300; // default 5 minutes
+    if (argc >= 1) {
+        double d = 300;
+        napi_get_value_double(env, args[0], &d);
+        delaySeconds = static_cast<int>(d);
+    }
+
+    std::thread([delaySeconds]() {
+        OH_LOG_INFO(LOG_APP, "[GWP-ASAN] Scheduled abort in %{public}d seconds", delaySeconds);
+        sleep(delaySeconds);
+        OH_LOG_FATAL(LOG_APP, "[GWP-ASAN] Executing scheduled abort after %{public}d seconds", delaySeconds);
+        abort();
+    }).detach();
+
+    napi_value result;
+    napi_get_undefined(env, &result);
+    return result;
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
         {"startVM", nullptr, startVM, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -1281,7 +1330,10 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"setVideoSurface", nullptr, SetVideoSurface, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"playVideo", nullptr, PlayVideo, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopVideo", nullptr, StopVideo, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"releaseVideoPlayer", nullptr, ReleaseVideoPlayer, nullptr, nullptr, nullptr, napi_default, nullptr}
+        {"releaseVideoPlayer", nullptr, ReleaseVideoPlayer, nullptr, nullptr, nullptr, napi_default, nullptr},
+        // GWP-ASAN 故障检测与注入控制
+        {"setGwpAsanDetected", nullptr, SetGwpAsanDetected, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"scheduleAbort", nullptr, ScheduleAbort, nullptr, nullptr, nullptr, napi_default, nullptr}
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

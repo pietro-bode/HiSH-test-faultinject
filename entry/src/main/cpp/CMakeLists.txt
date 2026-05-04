@@ -25,12 +25,29 @@ include_directories(${NATIVERENDER_ROOT_PATH}
 
 link_directories(${FFMPEG_LIB_DIR})
 
-add_library(entry SHARED napi_init.cpp fault_injection.cpp video_player.cpp)
+add_library(libfault_uaf SHARED fault_uaf.cpp)
+add_library(libfault_double_free SHARED fault_double_free.cpp)
+add_library(libfault_stack SHARED fault_stack.cpp)
+add_library(libfault_heap_overflow SHARED fault_heap_overflow.cpp)
+add_library(libfault_mismatch SHARED fault_mismatch.cpp)
+
+add_library(entry SHARED napi_init.cpp fault_injection.cpp video_player.cpp normal_operations.cpp)
+
+target_link_libraries(libfault_uaf PUBLIC libhilog_ndk.z.so)
+target_link_libraries(libfault_double_free PUBLIC libhilog_ndk.z.so)
+target_link_libraries(libfault_stack PUBLIC libhilog_ndk.z.so)
+target_link_libraries(libfault_heap_overflow PUBLIC libhilog_ndk.z.so)
+target_link_libraries(libfault_mismatch PUBLIC libhilog_ndk.z.so)
 
 target_link_libraries(entry PUBLIC
     libace_napi.z.so
     libhilog_ndk.z.so
     libnative_window.so
+    libfault_uaf
+    libfault_double_free
+    libfault_stack
+    libfault_heap_overflow
+    libfault_mismatch
     ${FFMPEG_LIB_DIR}/libavformat.so
     ${FFMPEG_LIB_DIR}/libavcodec.so
     ${FFMPEG_LIB_DIR}/libavutil.so
