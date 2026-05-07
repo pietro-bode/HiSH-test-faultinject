@@ -20,3 +20,8 @@ build-profile.json5.*
 .bitfun
 
 scripts/crash_logs/*
+
+/log
+/assets
+*pc
+
