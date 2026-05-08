@@ -4,9 +4,11 @@
 
 项目从 [HiSH-test-faultinject](https://gitcode.com/stesen1/HiSH-test-faultinject) clone 而来，而 HiSH-test-faultinject 则从 [HiSH](https://github.com/harmoninux/HiSH) (HarmonyOS版的termux) fork 而来，相比于 HiSH 主要增加了故障注入功能。
 
-## 架构与当前问题
+## 架构与历史问题
 
-### 架构
+### 架构版本演进
+
+#### 0423
 
 HiSH-test-faultinject 通过 ffmpeg 播放视频模拟用户态负载，并在 entry 模块中增加一个 subThread ，令他每0.05s在给定的10种(当前实际只选了5种)故障注入中随机选择一种，若注入后崩溃则输出对应的日志，并由系统生成 cppcrash 记录，若未崩溃则继续随机注入。
 
@@ -16,9 +18,15 @@ HiSH-test-faultinject 通过 ffmpeg 播放视频模拟用户态负载，并在 e
 
 关键代码信息在 `entry/src/main/cpp/fault_injection.cpp` 中。
 
-### 问题
+#### 0504
 
-现在的问题在于，目前浏览过的几十个cppcrash的最终直接触发崩溃的原因都是 type=2(Double free) 或者是 type=3(Stack overflow)。
+在05.04原仓库的更新中，对于故障注入逻辑进行了重构，使得每次只重复同一种type的注入，并且修改了 GWP_ASAN 机制，理论上会对0423的历史问题有所改进。
+
+具体尚未尝试
+
+### 0423历史问题
+
+0423的问题在于，目前浏览过的几十个cppcrash的最终直接触发崩溃的原因都是 type=2(Double free) 或者是 type=3(Stack overflow)。
 
 目前的推测是：
 
@@ -30,13 +38,6 @@ HiSH-test-faultinject 通过 ffmpeg 播放视频模拟用户态负载，并在 e
 4. 0.05s的时间可能太短，导致没有足够的时间让问题发酵，在埋的雷炸掉之前，就已经因为新一轮随机到了即时性的注入，导致crash了，不会再有让隐藏的问题显现进而导致崩溃的机会。
 
 即时性的问题相对而言是好分析的，因为捕捉到的crash现场基本就是造成崩溃的第一现场，追溯根因相对容易。然而静默执行下去的由于崩溃与异常的异步性相对难以追溯，也是想要攻克的。
-
-### 可能的解决思路
-
-1. 扩展注入类型，把文件中已有的10种都试一试，进一步查看上述推测是否成立。
-2. 延长0.05s的时间，观察是否会导致长时间之后崩溃的情况。
-3. 优化注入和用户态负载模拟，尝试更加真实的模拟是否会导致不同。
-4. ...
 
 
 
@@ -51,8 +52,6 @@ HiSH-test-faultinject 通过 ffmpeg 播放视频模拟用户态负载，并在 e
   - [entry/libs.zip](https://github.com/harmoninux/qemu/releases/download/hish-20260110/libs.zip)（解压到`entry/libs`）
   - [entry/src/main/resources/rawfile/vm/kernel_aarch64](https://github.com/harmoninux/linux-config/releases/download/kernel-20260228/kernel_aarch64)
   - [entry/src/main/resources/rawfile/vm/rootfs_aarch64.qcow2](https://github.com/harmoninux/linux-config/releases/download/rootfs-20260117/rootfs_aarch64.qcow2)
-
-
 
 **HiSH-test-faultinject 附加部署**：
 
