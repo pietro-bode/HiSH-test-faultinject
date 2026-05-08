@@ -8,7 +8,7 @@
 
 ### 架构
 
-HiSH-test-faultinject 通过 ffmpeg 播放视频模拟用户态负载，并在 entry 模块中增加一个 subThread ，令他每0.05s在给定的10种(当前实际代码为5种)故障注入中随机选择一种，若注入后崩溃则输出对应的日志，并由系统生成 cppcrash 记录，若未崩溃则继续随机注入。
+HiSH-test-faultinject 通过 ffmpeg 播放视频模拟用户态负载，并在 entry 模块中增加一个 subThread ，令他每0.05s在给定的10种(当前实际只选了5种)故障注入中随机选择一种，若注入后崩溃则输出对应的日志，并由系统生成 cppcrash 记录，若未崩溃则继续随机注入。
 
 并且，项目新开启了 GWP_ASan 机制，随机抽查一些 malloc 请求，如果抽查出问题就直接crash，主要用于检测 use after free.
 
@@ -124,7 +124,7 @@ HarmonyOS版的ffmpeg libs需要根据 `entry/src/main/cpp/third_party/ffmpeg/RE
 
 ### 模拟器注意事项
 
-启动耗费3-5分钟是正常的。
+模拟器启动耗费3-5分钟是正常的。
 
 - 在windows下，需要以管理员权限启动DevEco，否则模拟器会一直卡在HarmonyOS加载界面。
 
@@ -132,7 +132,7 @@ HarmonyOS版的ffmpeg libs需要根据 `entry/src/main/cpp/third_party/ffmpeg/RE
 
 模拟器日志通过 `设备管理器->具体的设备最右边的箭头->显示在磁盘上` 打开。
 
-- 如果 `kernel.log` 显示 **[QOS_CTRL] do_qos_ctrl_ioctl: pid not authorized** ，则为管理员权限问题；
+- 如果 `kernel.log` 显示 `[QOS_CTRL] do_qos_ctrl_ioctl: pid not authorized` ，则为管理员权限问题；
 
 - 如果是内存不够，那么日志中会有相关字段，建议交给AI分析。
 
