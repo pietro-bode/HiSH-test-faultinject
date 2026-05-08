@@ -1,5 +1,5 @@
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want, bundleManager } from '@kit.AbilityKit';
-import { hilog, hidebug } from '@kit.PerformanceAnalysisKit';
+import { hilog, hidebug, hiAppEvent } from '@kit.PerformanceAnalysisKit';
 import { window, KeyboardAvoidMode, PromptAction, UIContext } from '@kit.ArkUI';
 import common from '@ohos.app.ability.common';
 import preference from '@ohos.data.preferences';
@@ -54,6 +54,36 @@ export default class EntryAbility extends UIAbility {
       hilog.info(DOMAIN, 'testTag', 'GWP-ASan configured: sampleRate=500, maxSimutaneousAllocations=5000');
     } catch (e) {
       hilog.error(DOMAIN, 'testTag', 'Failed to configure GWP-ASan: %{public}s', JSON.stringify(e));
+    }
+
+    // 订阅 GWP-ASAN 故障事件
+    try {
+      hiAppEvent.addWatcher({
+        name: 'gwpasan_watcher',
+        appEventFilters: [
+          {
+            domain: hiAppEvent.domain.OS,
+            names: ['GWP_ASAN']
+          }
+        ],
+        onReceive: (domain: string, appEventGroups: hiAppEvent.AppEventGroup[]) => {
+          for (const group of appEventGroups) {
+            for (const info of group.appEventInfos) {
+              hilog.error(DOMAIN, 'testTag',
+                'GWP-ASAN event received: domain=%{public}s, name=%{public}s, params=%{public}s',
+                info.domain, info.name, info.params);
+            }
+          }
+          // 检测到 GWP-ASAN 事件后，禁止后续故障注入
+          napi.setGwpAsanDetected(true);
+          // 5分钟后自动 abort
+          napi.scheduleAbort(300);
+          hilog.error(DOMAIN, 'testTag', 'GWP-ASAN handling: fault injection gated, abort scheduled in 300s');
+        }
+      });
+      hilog.info(DOMAIN, 'testTag', 'GWP-ASAN watcher registered');
+    } catch (e) {
+      hilog.error(DOMAIN, 'testTag', 'Failed to register GWP-ASAN watcher: %{public}s', JSON.stringify(e));
     }
   }
 

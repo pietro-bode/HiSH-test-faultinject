@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-鸿蒙应用崩溃循环测试脚本（改进版）
+鸿蒙应用崩溃循环测试脚本（GWP-ASan 恢复模式增强版）
 
-检测策略：
-  1. 【主】故障日志文件出现：启动前记录基准文件列表，监控 faultlogger 目录是否有新文件
-  2. 【辅】进程消失：pidof 检测应用进程从有到无
-  3. 【辅】hilog 关键字：检测 SIGSEGV/SIGABRT/faultlogger/GWP-ASan 等关键字
+三种情况处理：
+  1. 应用退出，只产生 crash 日志 -> 只收集 crash 日志
+  2. 应用退出，产生了 crash + gwpasan 日志 -> 同时收集到同一目录
+  3. 应用产生了 gwpasan 日志但没有 crash 退出 -> 5分钟超时后 kill，重新测试
 
 用法:
     python crash_loop_test.py
-    python crash_loop_test.py --max-iterations 10 --poll-interval 3
+    python crash_loop_test.py --gwpasan-dir /data/log/gwpasan
 """
 
 import argparse
@@ -58,16 +58,13 @@ class HdcHelper:
         self.hdc = hdc_path
 
     def _run(self, *args, timeout: int = 60) -> str:
-        """运行 hdc 命令，子进程独立运行，确保 Ctrl+C 只发给 Python"""
         cmd = [self.hdc] + list(args)
         proc = None
         try:
             kwargs = {}
             if os.name == 'nt':
-                # Windows: 让子进程在新进程组中运行，不接收 Ctrl+C
                 kwargs['creationflags'] = subprocess.CREATE_NEW_PROCESS_GROUP
             else:
-                # Unix: 让子进程在新会话中运行
                 kwargs['start_new_session'] = True
 
             proc = subprocess.Popen(
@@ -115,6 +112,13 @@ class CrashLoopTester:
         "Abort message", "runtime error"
     ]
 
+    # GWP-ASan 日志可能的存放路径（按优先级尝试）
+    GWPASAN_CANDIDATE_DIRS = [
+        "/data/log/gwpasan/",
+        "/data/log/faultlog/gwpasan/",
+        "/dev/asanlog/",
+    ]
+
     def __init__(self, args: argparse.Namespace):
         self.bundle_name = args.bundle_name
         self.ability_name = args.ability_name
@@ -124,8 +128,12 @@ class CrashLoopTester:
         self.max_iterations = args.max_iterations
         self.clean_device_logs = args.clean_device_logs
         self.launch_mode = args.launch_mode
+        self.gwpasan_dir = args.gwpasan_dir
+        self.timeout_seconds = args.timeout_seconds
         self.hdc = None
-        self._baseline_logs = set()
+        self._baseline_fault = set()
+        self._baseline_gwpasan = set()
+        self._actual_gwpasan_dir = None
 
     def find_hdc(self) -> str:
         hdc = shutil.which("hdc")
@@ -160,12 +168,25 @@ class CrashLoopTester:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         print_info(f"PC 端日志保存目录: {self.log_dir}")
 
-    def enable_gwp_asan_prop(self) -> str:
-        prop = f"gwp_asan.enable.app.{self.bundle_name}"
-        print_info(f"设置 GWP-ASan 系统属性: {prop}=true")
-        result = self.hdc.shell(f"param set {prop} true")
-        print_info(f"设置结果: {result}")
-        return result
+        # 探测 GWP-ASan 日志实际路径
+        self._detect_gwpasan_dir()
+
+    def _detect_gwpasan_dir(self):
+        """探测设备上 GWP-ASan 日志的实际存放路径"""
+        if self.gwpasan_dir:
+            self._actual_gwpasan_dir = self.gwpasan_dir
+            print_info(f"使用指定的 GWP-ASan 日志路径: {self._actual_gwpasan_dir}")
+            return
+
+        for d in self.GWPASAN_CANDIDATE_DIRS:
+            result = self.hdc.shell(f"ls -d {d} 2>/dev/null")
+            if result and "No such file" not in result and "not exist" not in result.lower():
+                self._actual_gwpasan_dir = d
+                print_info(f"探测到 GWP-ASan 日志路径: {self._actual_gwpasan_dir}")
+                return
+
+        print_warn("未探测到 GWP-ASan 日志目录，将尝试使用默认路径 /data/log/gwpasan/")
+        self._actual_gwpasan_dir = "/data/log/gwpasan/"
 
     def start_app(self) -> str:
         if self.launch_mode == "test":
@@ -187,6 +208,8 @@ class CrashLoopTester:
     def clear_device_logs(self):
         print_info("清理设备旧故障日志...")
         self.hdc.shell("rm -f /data/log/faultlog/faultlogger/*")
+        if self._actual_gwpasan_dir:
+            self.hdc.shell(f"rm -f {self._actual_gwpasan_dir}*")
 
     def get_app_pid(self) -> str | None:
         result = self.hdc.shell(f"pidof {self.bundle_name}")
@@ -201,93 +224,225 @@ class CrashLoopTester:
         result = self.hdc.shell("ls -1 /data/log/faultlog/faultlogger/ 2>/dev/null")
         if not result or "No such file" in result:
             return set()
+        return {f.strip() for f in result.splitlines()
+                if f.strip()
+                and not f.strip().startswith("total")
+                and not f.strip().startswith("stacktrace")}
+
+    def list_gwpasan_files(self) -> set[str]:
+        if not self._actual_gwpasan_dir:
+            return set()
+        result = self.hdc.shell(f"ls -1 {self._actual_gwpasan_dir} 2>/dev/null")
+        if not result or "No such file" in result:
+            return set()
         return {f.strip() for f in result.splitlines() if f.strip() and not f.strip().startswith("total")}
 
     def check_new_fault_logs(self) -> list[str]:
         current = self.list_faultlogger_files()
-        new_files = current - self._baseline_logs
+        new_files = current - self._baseline_fault
         return list(new_files)
 
-    def check_hilog_crash_keywords(self) -> list[str]:
-        result = self.hdc.shell("hilog -d | tail -n 200")
-        if not result:
-            return []
-        matched = []
-        for kw in self.CRASH_KEYWORDS:
-            if kw in result:
-                matched.append(kw)
-        return matched
+    def check_new_gwpasan_logs(self) -> list[str]:
+        current = self.list_gwpasan_files()
+        new_files = current - self._baseline_gwpasan
+        return list(new_files)
 
-    def wait_for_crash(self, timeout_seconds: int = 0) -> tuple[bool, str]:
+    def enable_gwp_asan_prop(self) -> str:
+        # 开启 GWP-ASan
+        prop = f"gwp_asan.enable.app.{self.bundle_name}"
+        print_info(f"设置 GWP-ASan 系统属性: {prop}=true")
+        result1 = self.hdc.shell(f"param set {prop} true")
+        print_info(f"设置结果: {result1}")
+        # 设置可恢复模式（崩溃后不杀死进程，便于采集日志）
+        recoverable = f"gwp_asan.recoverable.app.{self.bundle_name}"
+        print_info(f"设置 GWP-ASan 恢复属性: {recoverable}=true")
+        result2 = self.hdc.shell(f"param set {recoverable} true")
+        print_info(f"设置结果: {result2}")
+        return result1 + "; " + result2
+
+    def wait_for_crash(self) -> tuple[bool, str, list[str], list[str]]:
+        """
+        等待崩溃或超时，返回 (是否检测到异常, 检测方式, crash日志列表, gwpasan日志列表)
+        检测方式: crash_only | crash_and_gwpasan | gwpasan_only_timeout | timeout | interrupted
+        """
         start_time = time.time()
         last_pid = None
-        print_info("开始监控崩溃（检测方式：故障日志/进程消失/hilog关键字）...")
+        has_new_crash = False
+        has_new_gwpasan = False
+        crash_logs = []
+        gwpasan_logs = []
+
+        print_info("开始监控崩溃（检测方式：faultlogger/gwpasan/进程消失/5分钟超时）...")
 
         while True:
             time.sleep(self.poll_interval)
+            elapsed = time.time() - start_time
 
-            # 检测 1：新的故障日志文件出现（最可靠）
-            new_logs = self.check_new_fault_logs()
-            if new_logs:
-                print_info(f"检测到新故障日志: {', '.join(new_logs)}")
-                return True, "faultlogger"
+            # 检查新日志
+            current_crash = self.check_new_fault_logs()
+            current_gwpasan = self.check_new_gwpasan_logs()
+            if current_crash:
+                has_new_crash = True
+                crash_logs = current_crash
+            if current_gwpasan:
+                has_new_gwpasan = True
+                gwpasan_logs = current_gwpasan
 
-            # 检测 2：进程消失
             current_pid = self.get_app_pid()
+
+            # 进程从有到无 -> 退出/崩溃
             if last_pid and not current_pid:
                 print_info(f"检测到应用进程已退出 (原 PID: {last_pid})")
-                return True, "pid_gone"
+                # 等待日志完全写入
+                time.sleep(self.post_crash_delay)
+                # 最终检查
+                final_crash = self.check_new_fault_logs()
+                final_gwpasan = self.check_new_gwpasan_logs()
+                if final_crash:
+                    has_new_crash = True
+                    crash_logs = final_crash
+                if final_gwpasan:
+                    has_new_gwpasan = True
+                    gwpasan_logs = final_gwpasan
+
+                if has_new_crash and has_new_gwpasan:
+                    print_info(f"情况2: 进程退出，检测到 crash({len(crash_logs)}个) + gwpasan({len(gwpasan_logs)}个) 日志")
+                    return True, "crash_and_gwpasan", crash_logs, gwpasan_logs
+                elif has_new_crash and not has_new_gwpasan:
+                    print_info(f"情况1: 进程退出，检测到 crash({len(crash_logs)}个) 日志，无 gwpasan 日志")
+                    return True, "crash_only", crash_logs, []
+                elif not has_new_crash and has_new_gwpasan:
+                    print_info(f"进程退出，检测到 gwpasan({len(gwpasan_logs)}个) 日志，无 crash 日志")
+                    return True, "gwpasan_only", [], gwpasan_logs
+                else:
+                    print_warn("进程退出但未检测到任何日志，视为正常退出")
+                    return True, "pid_gone_no_logs", [], []
+
             if current_pid:
                 last_pid = current_pid
 
-            # 检测 3：hilog 关键字
-            keywords = self.check_hilog_crash_keywords()
-            if keywords:
-                print_info(f"检测到 hilog 崩溃关键字: {', '.join(keywords)}")
-                return True, "hilog_keyword"
+            # 应用启动后快速崩溃：从未检测到PID，但已有新日志
+            if not current_pid and (has_new_crash or has_new_gwpasan):
+                print_info(f"检测到新日志但进程未运行，可能启动后快速崩溃 (crash={len(crash_logs)}, gwpasan={len(gwpasan_logs)})...")
+                time.sleep(self.post_crash_delay)
+                final_crash = self.check_new_fault_logs()
+                final_gwpasan = self.check_new_gwpasan_logs()
+                if final_crash:
+                    has_new_crash = True
+                    crash_logs = final_crash
+                if final_gwpasan:
+                    has_new_gwpasan = True
+                    gwpasan_logs = final_gwpasan
 
+                if has_new_crash and has_new_gwpasan:
+                    print_info(f"情况2: 快速崩溃，检测到 crash({len(crash_logs)}个) + gwpasan({len(gwpasan_logs)}个) 日志")
+                    return True, "crash_and_gwpasan", crash_logs, gwpasan_logs
+                elif has_new_crash:
+                    print_info(f"情况1: 快速崩溃，检测到 crash({len(crash_logs)}个) 日志，无 gwpasan 日志")
+                    return True, "crash_only", crash_logs, []
+                elif has_new_gwpasan:
+                    print_info(f"快速崩溃，检测到 gwpasan({len(gwpasan_logs)}个) 日志，无 crash 日志")
+                    return True, "gwpasan_only", [], gwpasan_logs
+
+            # 5分钟超时检查
+            if elapsed >= self.timeout_seconds:
+                if has_new_gwpasan and current_pid:
+                    # 情况3: 有gwpasan但进程未退出，超时kill
+                    print_warn(f"情况3: 检测到 GWP-ASan 日志但进程未退出，{self.timeout_seconds}s 超时，强制终止应用")
+                    self.stop_app()
+                    time.sleep(self.post_crash_delay)
+                    final_crash = self.check_new_fault_logs()
+                    final_gwpasan = self.check_new_gwpasan_logs()
+                    return True, "gwpasan_only_timeout", final_crash, final_gwpasan
+                else:
+                    print_warn(f"等待超时 ({self.timeout_seconds}s)，未检测到异常")
+                    return False, "timeout", [], []
+
+            # 状态打印
             if current_pid:
-                print(f"  应用运行中 (PID: {current_pid}) ...")
+                status = ""
+                if has_new_gwpasan:
+                    status = " [GWP-ASan detected]"
+                if has_new_crash:
+                    status += " [Crash detected]"
+                print(f"  应用运行中 (PID: {current_pid}){status}，已运行 {int(elapsed)}s ...")
             else:
-                print("  等待应用启动...")
+                if has_new_crash or has_new_gwpasan:
+                    status = ""
+                    if has_new_gwpasan:
+                        status = " [GWP-ASan detected]"
+                    if has_new_crash:
+                        status += " [Crash detected]"
+                    print(f"  等待应用启动... 已等待 {int(elapsed)}s (日志已检测到{status})")
+                else:
+                    print(f"  等待应用启动... 已等待 {int(elapsed)}s")
 
-            if timeout_seconds > 0:
-                if time.time() - start_time >= timeout_seconds:
-                    print_warn(f"等待超时 ({timeout_seconds}s)")
-                    return False, "timeout"
-
-    def collect_fault_logs(self, target_dir: Path, run_index: int) -> int:
+    def collect_fault_logs(self, target_dir: Path, run_index: int,
+                           crash_logs: list[str], gwpasan_logs: list[str]) -> int:
         collected = 0
 
-        # 只采集 faultlogger 下与目标应用相关的故障日志
+        # 1. 收集 crash 日志 (faultlogger)
         fault_dir = "/data/log/faultlog/faultlogger/"
-        print_info(f"扫描故障日志目录: {fault_dir}")
-        files = self.hdc.shell(f"ls -1 {fault_dir} 2>/dev/null")
-        if files and "No such file" not in files:
-            for file in files.splitlines():
-                file = file.strip()
-                if not file or file.startswith("total"):
-                    continue
-                # 只采集属于目标应用的故障日志
+        if crash_logs:
+            print_info(f"收集 crash 日志 ({len(crash_logs)} 个)...")
+            for file in crash_logs:
                 if self.bundle_name not in file:
                     continue
+                if file.startswith("stacktrace"):
+                    continue
                 remote = f"{fault_dir}{file}"
-                print_info(f"  拉取故障日志: {file}")
+                print_info(f"  拉取 crash 日志: {file}")
                 self.hdc.file_recv(remote, str(target_dir))
                 collected += 1
         else:
-            print_warn("faultlogger 目录为空")
+            # 兜底：扫描目录下所有属于该应用的日志
+            print_info("扫描 crash 日志目录...")
+            files = self.hdc.shell(f"ls -1 {fault_dir} 2>/dev/null")
+            if files and "No such file" not in files:
+                for file in files.splitlines():
+                    file = file.strip()
+                    if not file or file.startswith("total"):
+                        continue
+                    if file.startswith("stacktrace"):
+                        continue
+                    if self.bundle_name not in file:
+                        continue
+                    remote = f"{fault_dir}{file}"
+                    print_info(f"  拉取 crash 日志: {file}")
+                    self.hdc.file_recv(remote, str(target_dir))
+                    collected += 1
 
-        if collected == 0:
-            print_warn(f"未找到 {self.bundle_name} 的故障日志文件")
+        # 2. 收集 GWP-ASan 日志
+        if gwpasan_logs:
+            print_info(f"收集 GWP-ASan 日志 ({len(gwpasan_logs)} 个)...")
+            for file in gwpasan_logs:
+                remote = f"{self._actual_gwpasan_dir}{file}"
+                print_info(f"  拉取 GWP-ASan 日志: {file}")
+                self.hdc.file_recv(remote, str(target_dir))
+                collected += 1
+        else:
+            # 兜底扫描
+            if self._actual_gwpasan_dir:
+                print_info("扫描 GWP-ASan 日志目录...")
+                files = self.hdc.shell(f"ls -1 {self._actual_gwpasan_dir} 2>/dev/null")
+                if files and "No such file" not in files:
+                    for file in files.splitlines():
+                        file = file.strip()
+                        if not file or file.startswith("total"):
+                            continue
+                        remote = f"{self._actual_gwpasan_dir}{file}"
+                        print_info(f"  拉取 GWP-ASan 日志: {file}")
+                        self.hdc.file_recv(remote, str(target_dir))
+                        collected += 1
 
-        # 同时导出 hilog 和 dump 作为上下文参考
+        # 3. hilog 上下文
         hilog_file = target_dir / f"hilog_{run_index}.txt"
         print_info(f"  导出完整 hilog 到: {hilog_file}")
         hilog = self.hdc.shell("hilog -d | tail -n 1000")
         if hilog:
             hilog_file.write_text(hilog, encoding="utf-8")
 
+        # 4. dump
         dump_file = target_dir / f"app_dump_{run_index}.txt"
         dump = self.hdc.shell("aa dump -a")
         if dump:
@@ -296,9 +451,10 @@ class CrashLoopTester:
         return collected
 
     def run(self):
-        print_header("鸿蒙崩溃循环测试开始")
+        print_header("鸿蒙崩溃循环测试开始 [GWP-ASan 恢复模式]")
         print_info(f"目标应用: {self.bundle_name}/{self.ability_name}")
         print_info(f"启动模式: {self.launch_mode}")
+        print_info(f"超时时间: {self.timeout_seconds}s")
         if self.max_iterations == 0:
             print_info("循环次数: 无限 (按 Ctrl+C 停止)")
         else:
@@ -328,25 +484,30 @@ class CrashLoopTester:
                 self.stop_app()
                 time.sleep(1)
 
-                self._baseline_logs = self.list_faultlogger_files()
-                print_info(f"启动前故障日志基准: {len(self._baseline_logs)} 个文件")
+                # 记录基准
+                self._baseline_fault = self.list_faultlogger_files()
+                self._baseline_gwpasan = self.list_gwpasan_files()
+                print_info(f"启动前基准 - crash日志: {len(self._baseline_fault)} 个, gwpasan日志: {len(self._baseline_gwpasan)} 个")
 
                 self.enable_gwp_asan_prop()
                 self.start_app()
                 time.sleep(3)
 
-                crashed, detect_method = self.wait_for_crash()
+                crashed, detect_method, crash_logs, gwpasan_logs = self.wait_for_crash()
 
-                if not crashed:
-                    print_warn("本轮未检测到崩溃，强制停止应用后继续下一轮")
+                if detect_method == "timeout":
+                    print_warn("本轮未检测到异常，继续下一轮")
+                    self.stop_app()
+                elif detect_method == "gwpasan_only_timeout":
+                    print_info("情况3处理完成: 已强制终止应用并收集日志")
+                elif not crashed:
+                    print_warn("本轮异常，继续下一轮")
                     self.stop_app()
                 else:
-                    print_info(f"崩溃检测方式: {detect_method}")
-                    print_info(f"等待 {self.post_crash_delay}s 让日志完成写入...")
-                    time.sleep(self.post_crash_delay)
+                    print_info(f"检测方式: {detect_method}")
 
-                print_info("收集故障日志...")
-                count = self.collect_fault_logs(run_dir, iteration)
+                print_info("收集日志...")
+                count = self.collect_fault_logs(run_dir, iteration, crash_logs, gwpasan_logs)
                 total_logs += count
                 print_info(f"本轮收集到 {count} 个日志文件")
                 print_info(f"第 {iteration} 轮完成")
@@ -369,7 +530,7 @@ class CrashLoopTester:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="鸿蒙应用崩溃循环测试脚本（改进版）")
+    parser = argparse.ArgumentParser(description="鸿蒙崩溃循环测试脚本（GWP-ASan 恢复模式）")
     parser.add_argument("--bundle-name", default="dev.hackeris.hish.test", help="应用包名")
     parser.add_argument("--ability-name", default="EntryAbility", help="入口 Ability 名称")
     parser.add_argument("--log-dir", default="./crash_logs", help="PC 端日志保存目录")
@@ -378,9 +539,12 @@ def main():
     parser.add_argument("--max-iterations", type=int, default=0, help="最大循环次数，0 表示无限")
     parser.add_argument("--no-clean-device-logs", action="store_true", help="每轮开始前不清理设备上的旧故障日志")
     parser.add_argument("--launch-mode", choices=["start", "test"], default="start", help="启动模式")
+    parser.add_argument("--gwpasan-dir", default="", help="GWP-ASan 日志目录，默认自动探测")
+    parser.add_argument("--timeout", type=int, default=300, help="单轮测试超时时间（秒），默认 300（5分钟）")
 
     args = parser.parse_args()
     args.clean_device_logs = not args.no_clean_device_logs
+    args.timeout_seconds = args.timeout
 
     tester = CrashLoopTester(args)
     tester.init()

@@ -1,5 +1,6 @@
 import nativeModule from 'libentry.so';
 import { router } from '@kit.ArkUI';
+import { fileIo as fs } from '@kit.CoreFileKit';
 
 interface XComponentLoadContext {
   getXComponentSurfaceId(): string;
@@ -30,12 +31,42 @@ struct VideoPlayerPage {
     nativeModule.releaseVideoPlayer();
   }
 
-  startPlay() {
+  async startPlay() {
     if (this.isPlaying) {
       return;
     }
     const context = getContext(this);
-    let fullPath = context.filesDir + '/media/test.avi';
+
+    // 优先使用用户指定的 el2 路径（用户级加密）
+    const el2Path = '/data/storage/el2/base/files/media/test.avi';
+    // 备用 el1 路径（设备级加密）
+    const el1Path = context.filesDir + '/media/test.avi';
+
+    let fullPath = el2Path;
+    let pathFound = false;
+
+    // 检查文件是否存在
+    try {
+      await fs.access(el2Path);
+      pathFound = true;
+      console.info('[HiSH] Found video at el2 path: ' + el2Path);
+    } catch (e) {
+      console.warn('[HiSH] el2 path not accessible: ' + el2Path);
+      try {
+        await fs.access(el1Path);
+        fullPath = el1Path;
+        pathFound = true;
+        console.info('[HiSH] Found video at el1 path: ' + el1Path);
+      } catch (e2) {
+        console.warn('[HiSH] el1 path not accessible: ' + el1Path);
+      }
+    }
+
+    if (!pathFound) {
+      this.statusText = '视频文件不存在，请确认已放置到: ' + el2Path;
+      console.error('[HiSH] Video file not found at el2: ' + el2Path + ' or el1: ' + el1Path);
+      return;
+    }
 
     this.statusText = '正在加载: ' + this.videoPath;
     console.info('[HiSH] playVideo path=' + fullPath);
@@ -44,7 +75,7 @@ struct VideoPlayerPage {
       this.isPlaying = true;
       this.statusText = '播放中 (后台解码模式): ' + this.videoPath;
     } else {
-      this.statusText = '播放失败，请检查视频文件: ' + fullPath;
+      this.statusText = '播放失败，请检查视频文件格式是否支持: ' + fullPath;
     }
   }
 
